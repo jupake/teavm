@@ -13,6 +13,7 @@
 #include <stdalign.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <signal.h>
 #endif
 
 #ifdef _MSC_VER
@@ -158,6 +159,18 @@ static JavaArray* teavm_resourceMapKeys(TeaVM_ResourceMap *);
 
 static void TeaVM_beforeInit() {
     srand(time(NULL));
+
+    #ifdef __GNUC__
+    struct sigaction sigact;
+    sigact.sa_flags = 0;
+    sigact.sa_handler = NULL;
+    sigaction(SIGRTMIN, &sigact, NULL);
+
+    sigset_t signals;
+    sigemptyset(&signals );
+    sigaddset(&signals, SIGRTMIN);
+    sigprocmask(SIG_BLOCK, &signals, NULL);
+    #endif
 }
 
 #ifdef __GNUC__
@@ -274,3 +287,32 @@ static int32_t teavm_timeZoneOffset() {
 
 static char* teavm_stringToC(void*);
 static inline void teavm_free(void*);
+
+#ifdef __GNUC__
+
+static void teavm_waitFor(int64_t timeout) {
+    struct sigevent sev;
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGRTMIN;
+    timer_t timer;
+    timer_create(CLOCK_REALTIME, &sev, &timer);
+
+    struct itimerspec its;
+    its.it_value.tv_sec = timeout / 1000;
+    its.it_value.tv_nsec = (timeout % 1000) * 1000000L;
+    timer_settime(timer, 0, &its, NULL);
+
+    sigset_t signals;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGRTMIN);
+    siginfo_t actualSignal;
+    sigwaitinfo(&signals, &actualSignal);
+
+    timer_delete(timer);
+}
+
+static void teavm_interrupt() {
+    raise(SIGRTMIN);
+}
+
+#endif

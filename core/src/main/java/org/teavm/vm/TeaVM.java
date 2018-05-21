@@ -492,6 +492,7 @@ public class TeaVM implements TeaVMHost, ServiceRepository {
     }
 
     private void optimize(ListableClassHolderSource classSource) {
+        target.analyzeBeforeOptimizations(classSource);
         for (String className : classSource.getClassNames()) {
             ClassHolder cls = classSource.get(className);
             for (MethodHolder method : cls.getMethods()) {

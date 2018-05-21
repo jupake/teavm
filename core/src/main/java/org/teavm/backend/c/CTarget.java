@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -31,6 +32,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import org.teavm.ast.InvocationExpr;
 import org.teavm.ast.decompilation.Decompiler;
 import org.teavm.backend.c.analyze.CDependencyListener;
 import org.teavm.backend.c.generate.BufferedCodeWriter;
@@ -48,6 +50,7 @@ import org.teavm.backend.c.intrinsic.ExceptionHandlingIntrinsic;
 import org.teavm.backend.c.intrinsic.FunctionIntrinsic;
 import org.teavm.backend.c.intrinsic.GCIntrinsic;
 import org.teavm.backend.c.intrinsic.Intrinsic;
+import org.teavm.backend.c.intrinsic.IntrinsicContext;
 import org.teavm.backend.c.intrinsic.IntrinsicFactory;
 import org.teavm.backend.c.intrinsic.MutatorIntrinsic;
 import org.teavm.backend.c.intrinsic.PlatformClassIntrinsic;
@@ -57,6 +60,7 @@ import org.teavm.backend.c.intrinsic.PlatformObjectIntrinsic;
 import org.teavm.backend.c.intrinsic.RuntimeClassIntrinsic;
 import org.teavm.backend.c.intrinsic.ShadowStackIntrinsic;
 import org.teavm.backend.c.intrinsic.StructureIntrinsic;
+import org.teavm.backend.lowlevel.transform.CoroutineTransformation;
 import org.teavm.dependency.ClassDependency;
 import org.teavm.dependency.DependencyAnalyzer;
 import org.teavm.dependency.DependencyListener;
@@ -92,8 +96,11 @@ import org.teavm.model.lowlevel.NullCheckTransformation;
 import org.teavm.model.lowlevel.ShadowStackTransformer;
 import org.teavm.model.transformation.ClassInitializerInsertionTransformer;
 import org.teavm.model.transformation.ClassPatch;
+import org.teavm.model.util.AsyncMethodFinder;
 import org.teavm.runtime.Allocator;
+import org.teavm.runtime.EventQueue;
 import org.teavm.runtime.ExceptionHandling;
+import org.teavm.runtime.Fiber;
 import org.teavm.runtime.RuntimeArray;
 import org.teavm.runtime.RuntimeClass;
 import org.teavm.runtime.RuntimeObject;
@@ -114,6 +121,7 @@ public class CTarget implements TeaVMTarget, TeaVMCHost {
     private ExportDependencyListener exportDependencyListener = new ExportDependencyListener();
     private int minHeapSize = 32 * 1024 * 1024;
     private List<IntrinsicFactory> intrinsicFactories = new ArrayList<>();
+    private Set<MethodReference> asyncMethods;
 
     public void setMinHeapSize(int minHeapSize) {
         this.minHeapSize = minHeapSize;
@@ -192,6 +200,28 @@ public class CTarget implements TeaVMTarget, TeaVMCHost {
                 dependencyAnalyzer.linkField(field.getReference(), null);
             }
         }
+
+        dependencyAnalyzer.linkMethod(new MethodReference(Fiber.class, "isResuming", boolean.class), null).use();
+        dependencyAnalyzer.linkMethod(new MethodReference(Fiber.class, "isSuspending", boolean.class), null).use();
+        dependencyAnalyzer.linkMethod(new MethodReference(Fiber.class, "current", Fiber.class), null).use();
+        dependencyAnalyzer.linkMethod(new MethodReference(Fiber.class, "startMain", void.class), null).use();
+        dependencyAnalyzer.linkMethod(new MethodReference(EventQueue.class, "process", void.class), null).use();
+
+        ClassReader fiberClass = dependencyAnalyzer.getClassSource().get(Fiber.class.getName());
+        for (MethodReader method : fiberClass.getMethods()) {
+            if (method.getName().startsWith("pop") || method.getName().equals("push")) {
+                dependencyAnalyzer.linkMethod(method.getReference(), null).use();
+            }
+        }
+    }
+
+    @Override
+    public void analyzeBeforeOptimizations(ListableClassReaderSource classSource) {
+        AsyncMethodFinder asyncFinder = new AsyncMethodFinder(controller.getDependencyInfo().getCallGraph(),
+                controller.getDiagnostics());
+        asyncFinder.find(classSource);
+        asyncMethods = new HashSet<>(asyncFinder.getAsyncMethods());
+        asyncMethods.addAll(asyncFinder.getAsyncFamilyMethods());
     }
 
     @Override
@@ -205,6 +235,8 @@ public class CTarget implements TeaVMTarget, TeaVMCHost {
         classInitializerEliminator.apply(program);
         classInitializerTransformer.transform(program);
         nullCheckTransformation.apply(program, method.getResultType());
+        new CoroutineTransformation(controller.getUnprocessedClassSource(), asyncMethods)
+                .apply(program, method.getReference());
         shadowStackTransformer.apply(program, method);
     }
 
@@ -234,6 +266,7 @@ public class CTarget implements TeaVMTarget, TeaVMCHost {
         intrinsics.add(new ExceptionHandlingIntrinsic());
         intrinsics.add(new FunctionIntrinsic(characteristics, exportDependencyListener.getResolvedMethods()));
         intrinsics.add(new RuntimeClassIntrinsic());
+        intrinsics.add(new FiberIntrinsic());
 
         List<Generator> generators = new ArrayList<>();
         generators.add(new ArrayGenerator());
@@ -260,7 +293,7 @@ public class CTarget implements TeaVMTarget, TeaVMCHost {
         generateMain(context, codeWriter, classes, classGenerator.getTypes());
 
         try (PrintWriter writer = new PrintWriter(new OutputStreamWriter(
-                buildTarget.createResource(outputName), "UTF-8"))) {
+                buildTarget.createResource(outputName), StandardCharsets.UTF_8))) {
             codeWriter.writeTo(writer);
         }
     }
@@ -389,7 +422,7 @@ public class CTarget implements TeaVMTarget, TeaVMCHost {
         writer.println("initStaticFields();");
         generateStaticInitializerCalls(context, writer, classes);
         writer.println(context.getNames().forClassInitializer("java.lang.String") + "();");
-        generateCallToMainMethod(context, writer);
+        generateFiberStart(context, writer);
 
         writer.outdent().println("}");
     }
@@ -443,10 +476,30 @@ public class CTarget implements TeaVMTarget, TeaVMCHost {
         writer.outdent().println("}");
     }
 
-    private void generateCallToMainMethod(GenerationContext context, CodeWriter writer) {
+    private void generateFiberStart(GenerationContext context, CodeWriter writer) {
+        String startName = context.getNames().forMethod(new MethodReference(Fiber.class, "startMain", void.class));
+        String processName = context.getNames().forMethod(new MethodReference(EventQueue.class, "process", void.class));
+        writer.println(startName + "();");
+        writer.println(processName + "();");
+    }
+
+    class FiberIntrinsic implements Intrinsic {
+        @Override
+        public boolean canHandle(MethodReference method) {
+            return method.getClassName().equals(Fiber.class.getName())
+                    && method.getName().equals("runMain");
+        }
+
+        @Override
+        public void apply(IntrinsicContext context, InvocationExpr invocation) {
+            generateCallToMainMethod(context.names(), context.writer());
+        }
+    }
+
+    private void generateCallToMainMethod(NameProvider names, CodeWriter writer) {
         TeaVMEntryPoint entryPoint = controller.getEntryPoints().get("main");
         if (entryPoint != null) {
-            String mainMethod = context.getNames().forMethod(entryPoint.getReference());
+            String mainMethod = names.forMethod(entryPoint.getReference());
             writer.println(mainMethod + "(NULL);");
         }
     }
@@ -458,6 +511,6 @@ public class CTarget implements TeaVMTarget, TeaVMCHost {
 
     @Override
     public boolean isAsyncSupported() {
-        return false;
+        return true;
     }
 }

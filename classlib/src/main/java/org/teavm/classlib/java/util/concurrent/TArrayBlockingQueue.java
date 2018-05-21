@@ -27,11 +27,11 @@ import org.teavm.classlib.java.util.TAbstractQueue;
 import org.teavm.classlib.java.util.TCollection;
 import org.teavm.classlib.java.util.TIterator;
 import org.teavm.interop.Async;
+import org.teavm.interop.AsyncCallback;
 import org.teavm.interop.Sync;
 import org.teavm.platform.Platform;
 import org.teavm.platform.PlatformQueue;
 import org.teavm.platform.PlatformRunnable;
-import org.teavm.platform.async.AsyncCallback;
 
 public class TArrayBlockingQueue<E> extends TAbstractQueue<E> implements TBlockingQueue<E> {
     private Object[] array;

@@ -19,15 +19,18 @@ import com.carrotsearch.hppc.ObjectIntHashMap;
 import com.carrotsearch.hppc.ObjectIntMap;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.teavm.ast.MethodNode;
 import org.teavm.ast.RegularMethodNode;
 import org.teavm.ast.decompilation.Decompiler;
 import org.teavm.backend.c.generators.Generator;
 import org.teavm.backend.c.generators.GeneratorContext;
 import org.teavm.backend.lowlevel.generate.ClassGeneratorUtil;
+import org.teavm.dependency.DependencyInfo;
 import org.teavm.diagnostics.Diagnostics;
 import org.teavm.interop.Address;
 import org.teavm.interop.DelegateTo;
@@ -40,6 +43,7 @@ import org.teavm.model.ElementModifier;
 import org.teavm.model.FieldHolder;
 import org.teavm.model.FieldReader;
 import org.teavm.model.FieldReference;
+import org.teavm.model.ListableClassReaderSource;
 import org.teavm.model.MethodDescriptor;
 import org.teavm.model.MethodHolder;
 import org.teavm.model.MethodReference;
@@ -49,12 +53,14 @@ import org.teavm.model.classes.VirtualTable;
 import org.teavm.model.classes.VirtualTableEntry;
 import org.teavm.model.lowlevel.Characteristics;
 import org.teavm.model.lowlevel.ShadowStackTransformer;
+import org.teavm.model.util.AsyncMethodFinder;
 import org.teavm.runtime.RuntimeClass;
 import org.teavm.runtime.RuntimeObject;
 
 public class ClassGenerator {
     private GenerationContext context;
     private ClassReaderSource unprocessedClassSource;
+    private ListableClassReaderSource classSource;
     private Decompiler decompiler;
     private TagRegistry tagRegistry;
     private CodeGenerator codeGenerator;
@@ -182,7 +188,7 @@ public class ClassGenerator {
             }
 
             generateMethodForwardDeclaration(method);
-            RegularMethodNode methodNode = decompiler.decompileRegular(method);
+            MethodNode methodNode = decompiler.decompile(method);
             codeGenerator.generateMethod(methodNode);
         }
     }
@@ -191,7 +197,6 @@ public class ClassGenerator {
         codeGenerator.generateMethodSignature(forwardDeclarationsWriter, method.getReference(),
                 method.hasModifier(ElementModifier.STATIC), false);
         forwardDeclarationsWriter.println(";");
-
     }
 
     private void generateInitializer(ClassHolder cls) {

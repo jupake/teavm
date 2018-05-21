@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -223,7 +224,7 @@ public class JavaScriptTarget implements TeaVMTarget, TeaVMJavaScriptHost {
     @Override
     public void emit(ListableClassHolderSource classes, BuildTarget target, String outputName) {
         try (OutputStream output = target.createResource(outputName);
-                Writer writer = new OutputStreamWriter(output, "UTF-8")) {
+                Writer writer = new OutputStreamWriter(output, StandardCharsets.UTF_8)) {
             emit(classes, writer, target);
         } catch (IOException e) {
             throw new RenderingException(e);
